@@ -103,7 +103,7 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
     Status 	status;
     Page*	pagePtr;
 
-    cout << "opening file " << fileName << endl;
+    //cout << "opening file " << fileName << endl;
 
     /*
     // open the file and read in the header page and the first data page
@@ -162,12 +162,12 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
 
         returnStatus = OK;
 
-        
+        /*
         cout << "DEBUG: header.fileName = " << headerPage->fileName << endl;
         cout << "DEBUG: header.firstPage=" << headerPage->firstPage
                 << " lastPage=" << headerPage->lastPage
                 << " pageCnt=" << headerPage->pageCnt
-                << " recCnt=" << headerPage->recCnt << endl;
+                << " recCnt=" << headerPage->recCnt << endl;*/
     }
     else
     {
@@ -181,7 +181,7 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
 HeapFile::~HeapFile()
 {
     Status status;
-    cout << "invoking heapfile destructor on file " << headerPage->fileName << endl;
+    //cout << "invoking heapfile destructor on file " << headerPage->fileName << endl;
 
     // see if there is a pinned data page. If so, unpin it 
     if (curPage != NULL)
@@ -378,7 +378,7 @@ const Status HeapFileScan::scanNext(RID& outRid)
 	// If no page is currently pinned, start from the first data page.
     if (curPage == NULL) {
         nextPageNo = headerPage->firstPage;
-        if (nextPageNo == -1) {
+        if (nextPageNo < 0) {
             return FILEEOF;   // no data pages
         }
 
@@ -387,78 +387,72 @@ const Status HeapFileScan::scanNext(RID& outRid)
 
         curPageNo = nextPageNo;
         curDirtyFlag = false;
-
-        // Start with the first record on the first page
-        status = curPage->firstRecord(nextRid);
-        if (status != OK) {
-            // page has no records; unpin & move on
-            bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
-            curPage = NULL;
-            return scanNext(outRid);
-        }
+        curRec = NULLRID; // indicate we haven't started scanning this page
     }
-    else {
-        // Already have a page pinned
-        status = curPage->nextRecord(curRec, nextRid);
-        if (status == ENDOFPAGE) {
-            // move to next page
-            curPage->getNextPage(nextPageNo); //change 11/20
-            bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
+
+    // Loop over pages until we either find a matching record or run out of pages.
+    while (true)
+    {
+        // Attempt to get the next record on the current page.
+        if (curRec.pageNo == -1) {
+            status = curPage->firstRecord(nextRid);
+        } else {
+            status = curPage->nextRecord(curRec, nextRid);
+        }
+
+        if (status == OK) {
+            // We have a candidate record on the pinned curPage.
+            status = curPage->getRecord(nextRid, rec);
+            if (status != OK) return status;
+
+            if (matchRec(rec)) {
+                // Found matching record — keep page pinned and return RID.
+                curRec = nextRid;
+                outRid = nextRid;
+                return OK;
+            }
+
+            // Not a match: advance curRec and continue scanning the same page.
+            curRec = nextRid;
+            continue;
+        }
+
+        // No more records on this page; move to next page in the linked list.
+        if (status == ENDOFPAGE || status == NORECORDS) {
+            // Get the next page number while curPage is still pinned
+            status = curPage->getNextPage(nextPageNo);
+            if (status != OK) return status;
+
+            // Unpin the current page now that we're done with it
+            status = bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
+            if (status != OK) return status;
+
+            // Reset curPage state
             curPage = NULL;
             curPageNo = 0;
             curDirtyFlag = false;
             curRec = NULLRID;
 
+            // If no next page, scanning finished
+            if (nextPageNo < 0) return FILEEOF;
 
-            if (nextPageNo > headerPage->lastPage)
-                return FILEEOF;
-
+            // Read/pin the next page
             status = bufMgr->readPage(filePtr, nextPageNo, curPage);
             if (status != OK) return status;
 
             curPageNo = nextPageNo;
             curDirtyFlag = false;
-
-            status = curPage->firstRecord(nextRid);
-            if (status != OK) {
-                // empty page; unpin & continue scanning further
-                bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
-                curPage = NULL;
-                return scanNext(outRid);
-            }
+            curRec = NULLRID; // start at first record of new page
+            // loop back to scan this new page
+            continue;
         }
-        else if (status != OK)
-            return status;
+
+        // Any other error: propagate it
+        return status;
     }
 
-    // We now have a candidate nextRid — check matchRec()
-    while (true)
-    {
-        status = curPage->getRecord(nextRid, rec);
-        if (status != OK) return status;
-
-        if (matchRec(rec)) {
-            curRec = nextRid;
-            outRid = nextRid;
-            return OK;
-        }
-
-        // get next record
-        status = curPage->nextRecord(nextRid, tmpRid);
-        if (status == ENDOFPAGE) {
-            // go to next page
-            bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
-            curPage = NULL;
-            return scanNext(outRid);
-        }
-        else if (status != OK)
-            return status;
-
-        nextRid = tmpRid;
-    }
-
-    return OK; // should never reach here
-	
+    // unreachable
+    return OK;
 }
 
 
