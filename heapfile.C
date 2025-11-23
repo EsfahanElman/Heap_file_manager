@@ -474,6 +474,10 @@ const Status HeapFileScan::scanNext(RID& outRid)
         TIPS: It is always a good idea to check if curPage is NULL, and if so, then how to handle that case.
     */
 	
+    // at top of scanNext
+    if (curPage == NULL && curPageNo == -1)
+        return FILEEOF; // reached EOF on previous call
+
 	// If no page is currently pinned, start from the first data page.
     if (curPage == NULL) {
         nextPageNo = headerPage->firstPage;
