@@ -82,9 +82,22 @@ const Status createHeapFile(const string fileName)
         hdrPage->lastPage = newPageNo;
         hdrPage->pageCnt = 2;
 
-        // Unpin & mark dirty
-        bufMgr->unPinPage(file, newPageNo, true);
-        bufMgr->unPinPage(file, hdrPageNo, true);
+        // Unpin and mark pages dirty
+        status = bufMgr->unPinPage(file, newPageNo, true);
+        if (status != OK) return status;
+        //cout << "After unpin first data page" << endl;
+        //bufMgr->printSelf();
+
+        status = bufMgr->unPinPage(file, hdrPageNo, true);
+        if (status != OK) return status;
+        //cout << "After unpin header page" << endl;
+        //bufMgr->printSelf();
+        
+        // Close the file to decrement openCnt NEWLY ADDED, solve destroyHeapFile test 
+        status = db.closeFile(file);
+        if (status != OK) return status;
+
+        //cerr << "createHeapFile: openCnt after constructor = " << file->openCnt << endl;
 
         return OK;
     }
@@ -94,6 +107,18 @@ const Status createHeapFile(const string fileName)
 // routine to destroy a heapfile
 const Status destroyHeapFile(const string fileName)
 {
+    /*
+    File* f = nullptr;
+    Status s = db.openFile(fileName, f);
+    if (s != OK) {
+        cerr << "Cannot open file " << fileName << " to check openCnt\n";
+        return s;
+    }
+
+    cerr << "About to destroy file, openCnt=" << f->openCnt << endl;
+
+    // Close immediately
+    db.closeFile(f);*/
 	return (db.destroyFile (fileName));
 }
 
@@ -138,18 +163,15 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
     if ((status = db.openFile(fileName, filePtr)) == OK)
     {
         // Read the header page
-        int firstPageNo;
-        Status s = filePtr->getFirstPage(firstPageNo);
-        if (s != OK) {
-            returnStatus = s; 
-            return;
-        }
-        headerPageNo = firstPageNo;
+        int newPageNo;
+        status = filePtr->getFirstPage(newPageNo);
+        if (status != OK) { returnStatus = status; return; }
 
-        status = bufMgr->readPage(filePtr, headerPageNo, pagePtr);
+        status = bufMgr->readPage(filePtr, newPageNo, pagePtr);
         if (status != OK) { returnStatus = status; return; }
 
         headerPage = (FileHdrPage*) pagePtr;
+        headerPageNo = newPageNo;
         hdrDirtyFlag = false;
 
         // Read the first data page
@@ -161,6 +183,10 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
         curRec = NULLRID;
 
         returnStatus = OK;
+
+        // for DEBUGGING
+        //cout << "DEBUG: bufMgr printSelf in Heapfile constructor ending" << endl;
+        //bufMgr->printSelf();
 
         /*
         cout << "DEBUG: header.fileName = " << headerPage->fileName << endl;
@@ -177,11 +203,16 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
     }
 }
 
+
 // the destructor closes the file
 HeapFile::~HeapFile()
 {
+    // for DEBUGGING
+    //cout << "DEBUG: bufMgr printSelf in Heapfile destructor before it does closing job" << endl;
+    //bufMgr->printSelf();
+    
     Status status;
-    //cout << "invoking heapfile destructor on file " << headerPage->fileName << endl;
+   // cout << "invoking heapfile destructor on file " << headerPage->fileName << endl;
 
     // see if there is a pinned data page. If so, unpin it 
     if (curPage != NULL)
@@ -197,8 +228,8 @@ HeapFile::~HeapFile()
     status = bufMgr->unPinPage(filePtr, headerPageNo, hdrDirtyFlag);
     if (status != OK) cerr << "error in unpin of header page\n";
 	
-	// status = bufMgr->flushFile(filePtr);  // make sure all pages of the file are flushed to disk
-	// if (status != OK) cerr << "error in flushFile call\n";
+	//status = bufMgr->flushFile(filePtr);  // make sure all pages of the file are flushed to disk
+	//if (status != OK) cerr << "error in flushFile call\n";
 	// before close the file
 	status = db.closeFile(filePtr);
     if (status != OK)
@@ -207,7 +238,75 @@ HeapFile::~HeapFile()
 		Error e;
 		e.print (status);
     }
+
+    //cout << "HeapFile::~HeapFile() for " << headerPage->fileName
+    // << " curPageNo=" << curPageNo << " curPage=" << curPage
+    // << " hdrDirty=" << hdrDirtyFlag << " curDirty=" << curDirtyFlag << "\n";
+
+    // for DEBUGGING
+    //cout << "DEBUG: bufMgr printSelf in Heapfile destructor after it does closing job" << endl;
+    //bufMgr->printSelf();
 }
+/*
+HeapFile::~HeapFile()
+{
+    Status s;
+
+    // ----- UNPIN CURRENT DATA PAGE (if it is actually pinned) -----
+    if (curPage != NULL) {
+        s = bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
+        if (s != OK) {
+            cerr << "HeapFile::~HeapFile(): unPinPage(curPage) failed for page "
+                 << curPageNo << " status=" << s << endl;
+        }
+        curPage = NULL;
+        curPageNo = -1;
+        curDirtyFlag = false;
+    }
+
+    // ----- UNPIN HEADER PAGE (if it is actually pinned) ----------
+    if (headerPage != NULL) {
+        s = bufMgr->unPinPage(filePtr, headerPageNo, hdrDirtyFlag);
+        if (s != OK) {
+            cerr << "HeapFile::~HeapFile(): unPinPage(header) failed for page "
+                 << headerPageNo << " status=" << s << endl;
+        }
+        headerPage = NULL;
+        headerPageNo = -1;
+        hdrDirtyFlag = false;
+    }
+
+    // ----- Optional: flush file frames (helpful for debugging) ----
+    // Note: File::close() will call bufMgr->flushFile(this) when openCnt hits 0.
+    // But flushing here can make error causes more visible earlier.
+    if (filePtr != NULL) {
+        s = bufMgr->flushFile(filePtr);
+        if (s != OK && s != FILENOTOPEN) {
+            cerr << "HeapFile::~HeapFile(): flushFile returned " << s << endl;
+        }
+    }
+
+    // ----- LOG openCnt (for debugging) ----------------------------
+    if (filePtr != NULL) {
+        // filePtr->openCnt is accessible in your codebase (File class). If not public,
+        // skip this log or add a helper in DB to print open count.
+        cerr << "HeapFile::~HeapFile() closing file \"" << filePtr->fileName
+             << "\" openCnt(before close) = " << filePtr->openCnt << endl;
+    }
+
+    // ----- CLOSE THE DB FILE -------------------------------------
+    if (filePtr != NULL) {
+        s = db.closeFile(filePtr);
+        if (s != OK) {
+            cerr << "HeapFile::~HeapFile(): db.closeFile failed, status=" << s << endl;
+        } else {
+            cerr << "HeapFile::~HeapFile(): db.closeFile succeeded for "
+                 << /*filePtr->fileName "(file)" << endl;
+            filePtr = NULL;
+        }
+    }
+}
+*/
 
 // Return number of records in heap file
 
@@ -418,7 +517,7 @@ const Status HeapFileScan::scanNext(RID& outRid)
         }
 
         // No more records on this page; move to next page in the linked list.
-        if (status == ENDOFPAGE || status == NORECORDS) {
+        if (status == ENDOFPAGE || status == NORECORDS) { // check if NORECORDS ia returned by any func being called
             // Get the next page number while curPage is still pinned
             status = curPage->getNextPage(nextPageNo);
             if (status != OK) return status;
@@ -429,9 +528,9 @@ const Status HeapFileScan::scanNext(RID& outRid)
 
             // Reset curPage state
             curPage = NULL;
-            curPageNo = 0;
+            curPageNo = -1; //thinking if should change to -1 but InsertFileScan constructor use 0 too
             curDirtyFlag = false;
-            curRec = NULLRID;
+            curRec = NULLRID; // are we supposed to change if the rid returned last time was from the prev pinned page, based in how we get firstrecord it seems yes NULLRID is needed
 
             // If no next page, scanning finished
             if (nextPageNo < 0) return FILEEOF;
@@ -551,7 +650,7 @@ InsertFileScan::InsertFileScan(const string & name,
   // data page of the file into the buffer pool
   // if the first data page of the file is not the last data page of the file
   // unpin the current page and read the last page
-    if ((curPage != NULL) && (curPageNo != headerPage->lastPage))
+    if ((curPage != NULL) && (curPageNo != headerPage->lastPage)) // is curPageNo always the first page at this point
     {
         status = bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
         if (status != OK) cerr << "error in unpin of data page\n"; 
@@ -613,16 +712,16 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
 
     // If curPage is NULL, start with the last page (or create one if none exist)
     if (curPage == NULL) {
-        if (headerPage->lastPage == -1) {
+        if (headerPage->lastPage == -1) { // i thought this part not needed, cuz in createHeapFile, u create the first data page tgt wuth header page
             // No data pages exist — create the first page
             status = bufMgr->allocPage(filePtr, newPageNo, newPage);
             if (status != OK) return status;
             
-            newPage->init(newPageNo); // change 11/20
+            newPage->init(newPageNo);
             newPage->setNextPage(-1);
             headerPage->lastPage = newPageNo;
             headerPage->firstPage = newPageNo;
-            headerPage->pageCnt = 1;
+            headerPage->pageCnt = 2; //i changed to two cuz it is hdr plus data page
             hdrDirtyFlag = true;
 
             curPage = newPage;
@@ -641,6 +740,10 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
     // Try inserting into current page
     status = curPage->insertRecord(rec, rid);
     if (status == OK) {
+        //DEBUG
+        //cout << "DEBUG: inserting record " << headerPage->recCnt 
+        //<< " into page " << curPageNo << endl;
+
         // success — update bookkeeping
         outRid = rid;
         headerPage->recCnt++;
@@ -654,9 +757,14 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
 
     // Allocate new page
     status = bufMgr->allocPage(filePtr, newPageNo, newPage);
+
+    // DEBUG
+    //cout << "DEBUG: allocating new page " << newPageNo 
+    // << " because current page full" << endl;
+
     if (status != OK) return status;
 
-    newPage->init(newPageNo);  // change 11/20
+    newPage->init(newPageNo);
     newPage->setNextPage(-1);
     curPage->setNextPage(newPageNo);
     curDirtyFlag = true; 
@@ -671,12 +779,18 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
     if (status != OK) return status;
 
     // New page becomes current
+    // DO I have to readpage new page here?
     curPage = newPage;
     curPageNo = newPageNo;
     curDirtyFlag = true;
 
     // insert again — this time must succeed
     status = curPage->insertRecord(rec, rid);
+
+    //DEBUG
+    //cout << "DEBUG: inserting record " << headerPage->recCnt
+    // << " into page " << curPageNo << endl;
+
     if (status != OK) return status;
 
     outRid = rid;
