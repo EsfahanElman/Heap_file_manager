@@ -1,6 +1,24 @@
 #include "heapfile.h"
 #include "error.h"
 
+
+/**
+ *
+ * Group name: G5
+ * Group members: Jing Wen Choong, Esfahan Elman, Learoy Daryl Joseph
+ * Email: jchoong2@wisc.edu, eelman@wisc.edu, ljoseph4@wisc.edu
+ * UW_ID: 9084745299, 9084751578, 9084865840
+ *  
+ * Description: This file contains the implementation of the HeapFile and HeapFileScan classes for managing heap files in a database system.
+ * The HeapFile class provides methods to create, destroy, and manipulate heap files, including reading and writing records.
+ * The HeapFileScan class extends HeapFile to support scanning through records with optional filtering based on specified criteria.
+ * The InsertFileScan class extends HeapFile to support inserting records into the heap file and managing page allocations.
+ * The implementation ensures proper handling of pages in the buffer pool, including pinning and unpinning pages,bookeeping of heap flags to maintain the integrity of the heap file structure.
+ * The code also includes error handling for invalid inputs and input checking to ensure robustness.
+ * 
+ * 
+ */
+
 /*
         Creates: empty (almost empty) heap file using db->createfile()
 
@@ -17,6 +35,11 @@
 // routine to create a heapfile
 const Status createHeapFile(const string fileName)
 {
+    // check for valid file name and return error if invalid
+    if (fileName.empty()) {
+        return BADFILE;
+    }
+
     File*               file;
     Status              status;
     FileHdrPage*        hdrPage;
@@ -78,7 +101,10 @@ const Status createHeapFile(const string fileName)
 // routine to destroy a heapfile
 const Status destroyHeapFile(const string fileName)
 {
-        return (db.destroyFile (fileName));
+    if (fileName.empty()) {
+        return BADFILE;
+    }
+    return db.destroyFile(fileName);
 }
 
 /*
@@ -92,7 +118,7 @@ const Status destroyHeapFile(const string fileName)
 // constructor opens the underlying file
 HeapFile::HeapFile(const string & fileName, Status& returnStatus)
 {
-    Status      status;
+    /** Status      status;
     Page*       pagePtr;
 
     // cout << "opening file " << fileName << endl;
@@ -129,6 +155,92 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
                 returnStatus = status;
                 return;
     }
+                **/
+
+    // Initialize members to safe defaults first
+    filePtr      = NULL;
+    headerPage   = NULL;
+    headerPageNo = -1;
+    hdrDirtyFlag = false;
+    curPage      = NULL;
+    curPageNo    = -1;
+    curDirtyFlag = false;
+    curRec       = NULLRID;
+
+    returnStatus = OK;
+
+    // 0. Basic argument check
+    if (fileName.empty()) {
+        returnStatus = BADFILE;
+        return;
+    }
+
+    Status status;
+    Page*  pagePtr = NULL;
+
+    // 1. Open the file
+    status = db.openFile(fileName, filePtr);
+    if (status != OK) {
+        filePtr = NULL;
+        returnStatus = status;
+        return;
+    }
+
+    // 2. Read and pin the header page
+    int hdrPageNoLocal = -1;
+    status = filePtr->getFirstPage(hdrPageNoLocal);
+    if (status != OK) {
+        db.closeFile(filePtr);
+        filePtr = NULL;
+        returnStatus = status;
+        return;
+    }
+
+    status = bufMgr->readPage(filePtr, hdrPageNoLocal, pagePtr);
+    if (status != OK) {
+        db.closeFile(filePtr);
+        filePtr = NULL;
+        returnStatus = status;
+        return;
+    }
+
+    headerPage   = (FileHdrPage*) pagePtr;
+    headerPageNo = hdrPageNoLocal;
+    hdrDirtyFlag = false;
+
+    // (Optional sanity check) headerPage->firstPage should be valid
+    if (headerPage->firstPage < 1) {
+        // header looks corrupt: clean up
+        bufMgr->unPinPage(filePtr, headerPageNo, false);
+        db.closeFile(filePtr);
+        headerPage   = NULL;
+        headerPageNo = -1;
+        filePtr      = NULL;
+        returnStatus = BADPAGENO;
+        return;
+    }
+
+    // 3. Read and pin the first data page
+    curPageNo = headerPage->firstPage;
+    status = bufMgr->readPage(filePtr, curPageNo, curPage);
+    if (status != OK) {
+        // unpin header page, close file, then bail
+        bufMgr->unPinPage(filePtr, headerPageNo, false);
+        headerPage   = NULL;
+        headerPageNo = -1;
+        db.closeFile(filePtr);
+        filePtr   = NULL;
+        curPage   = NULL;
+        curPageNo = -1;
+        returnStatus = status;
+        return;
+    }
+
+    // 4. Set curRec to NULLRID
+    curDirtyFlag = false;
+    curRec       = NULLRID;
+
+    returnStatus = OK;
 }
 
 
@@ -515,6 +627,11 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
     int         newPageNo;
     Status      status, unpinstatus;
     RID         rid;
+
+     // check for bad or very large records
+     if (rec.length <= 0) {
+        return INVALIDRECLEN;
+    }
 
     // check for very large records
     if ((unsigned int) rec.length > PAGESIZE-DPFIXED)
